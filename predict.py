@@ -8,6 +8,9 @@ import argparse
 from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
+import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 def normalize_depth_for_visualization(depth_map):
     """
@@ -38,6 +41,64 @@ def normalize_depth_for_visualization(depth_map):
     normalized = ((depth_map - min_val) / (max_val - min_val) * 65535).astype(np.uint16)
     
     return normalized
+
+def create_depth_visualization(depth_map, frame_name, colormap='viridis'):
+    """
+    Create a colorized depth visualization with colorbar, displaying actual depth values.
+    Reference: vis.py visualization approach
+    
+    Args:
+        depth_map: Numpy array of depth values
+        frame_name: Name to display as title
+        colormap: Matplotlib colormap name (default: 'viridis')
+    
+    Returns:
+        RGB visualization image as uint8 array
+    """
+    # Ensure depth_map is 2D
+    if len(depth_map.shape) > 2:
+        depth_map = np.squeeze(depth_map)
+    
+    # Handle NaN or inf values
+    depth_map = np.nan_to_num(depth_map)
+    
+    # Check if this might be inverse depth (values close to 1)
+    mean_val = np.mean(depth_map)
+    if 0.8 < mean_val < 1.2 and np.std(depth_map) < 0.1:
+        print("Detected possible inverse depth. Converting to depth...")
+        # Convert from inverse depth to depth
+        # Avoid division by zero
+        depth_map = np.where(depth_map > 1e-8, 1.0 / depth_map, 0)
+    
+    # Get file information (similar to vis.py)
+    print(f"数据形状: {depth_map.shape}")
+    print(f"数据类型: {depth_map.dtype}")
+    print(f"数值范围: {depth_map.min():.3f} - {depth_map.max():.3f}")
+    
+    # Create figure (following vis.py style)
+    plt.figure(figsize=(12, 8))
+    
+    # Display depth map with viridis colormap
+    plt.imshow(depth_map, cmap=colormap)
+    plt.colorbar(label='Value')
+    plt.title(f'{frame_name} - Single Channel')
+    plt.axis('off')
+    plt.tight_layout()
+    
+    # Convert matplotlib figure to numpy array
+    fig = plt.gcf()
+    fig.canvas.draw()
+    buf = fig.canvas.buffer_rgba()
+    w, h = fig.canvas.get_width_height()
+    img_array = np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 4)
+    
+    # Convert RGBA to RGB
+    img_rgb = img_array[:, :, :3]
+    
+    # Close figure to free memory
+    plt.close()
+    
+    return img_rgb
 
 def predict_frame(frame_path, output_dir, model=None, device=None, dtype=None, all_camera_params=None, cache_dir="./vggt_models"):
     """
@@ -111,12 +172,21 @@ def predict_frame(frame_path, output_dir, model=None, device=None, dtype=None, a
     if len(depth_map.shape) > 2:
         depth_map = np.squeeze(depth_map)
     
-    # Save normalized depth as PNG
+    # Save normalized depth as PNG (original functionality)
     depth_norm = normalize_depth_for_visualization(depth_map)
     depth_img = Image.fromarray(depth_norm)
     depth_path = os.path.join(output_dir, f"{frame_name}_depth.png")
     depth_img.save(depth_path)
     print(f"Saved depth map to {depth_path}")
+    
+    # Create and save depth visualization with colorbar
+    # Use a suitable frame identifier
+    display_name = "00000"  # Or extract from frame_name if needed
+    depth_vis = create_depth_visualization(depth_map, display_name, colormap='viridis')
+    depth_vis_img = Image.fromarray(depth_vis)
+    depth_vis_path = os.path.join(output_dir, f"{frame_name}_depth_vis.png")
+    depth_vis_img.save(depth_vis_path)
+    print(f"Saved depth visualization to {depth_vis_path}")
     
     # Collect camera parameters for this frame
     all_camera_params[frame_name] = {

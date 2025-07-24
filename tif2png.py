@@ -1,265 +1,341 @@
-from osgeo import gdal
+import os
+import cv2
 import numpy as np
 from PIL import Image
-import os
-import json
+import argparse
+from pathlib import Path
+from tqdm import tqdm
+import warnings
 
+def check_tif_properties(tif_path):
+    """Check properties of TIF file to understand its format."""
+    try:
+        # Try with PIL first
+        with Image.open(tif_path) as img:
+            print(f"\nPIL Info for {os.path.basename(tif_path)}:")
+            print(f"  Mode: {img.mode}")
+            print(f"  Size: {img.size}")
+            print(f"  Format: {img.format}")
+            if hasattr(img, 'bits'):
+                print(f"  Bits: {img.bits}")
+    except Exception as e:
+        print(f"PIL failed to read {tif_path}: {e}")
+    
+    # Try with OpenCV
+    img_cv = cv2.imread(tif_path, cv2.IMREAD_UNCHANGED)
+    if img_cv is not None:
+        print(f"\nOpenCV Info for {os.path.basename(tif_path)}:")
+        print(f"  Shape: {img_cv.shape}")
+        print(f"  Dtype: {img_cv.dtype}")
+        print(f"  Min/Max values: {img_cv.min()}, {img_cv.max()}")
+        if len(img_cv.shape) == 3:
+            for i in range(img_cv.shape[2]):
+                print(f"  Channel {i} - Min/Max: {img_cv[:,:,i].min()}, {img_cv[:,:,i].max()}")
+    else:
+        print(f"OpenCV also failed to read {tif_path}")
+    
+    return img_cv is not None
 
-def enhance_elevation_contrast(data, valid_mask, enhancement_factor=2.0):
+def robust_normalize(img, percentile_clip=0.1):
     """
-    Enhance contrast for elevation data visualization
+    Robustly normalize image data to 0-255 range using percentile clipping.
+    This handles outliers better than simple min-max normalization.
     """
-    valid_data = data[valid_mask]
-    
-    # Use a tighter percentile range for better contrast
-    pmin = np.percentile(valid_data, 5)
-    pmax = np.percentile(valid_data, 95)
-    
-    # Apply contrast enhancement
-    center = (pmin + pmax) / 2
-    enhanced = center + (data - center) * enhancement_factor
-    
-    # Clip to valid range
-    enhanced = np.clip(enhanced, pmin, pmax)
-    
-    return enhanced, pmin, pmax
+    # Handle each channel separately for better color preservation
+    if len(img.shape) == 3:
+        normalized = np.zeros_like(img, dtype=np.float32)
+        for i in range(img.shape[2]):
+            channel = img[:,:,i]
+            # Use percentiles to handle outliers
+            p_low = np.percentile(channel, percentile_clip)
+            p_high = np.percentile(channel, 100 - percentile_clip)
+            
+            if p_high - p_low > 1e-6:
+                # Clip and normalize
+                channel_norm = np.clip(channel, p_low, p_high)
+                channel_norm = (channel_norm - p_low) / (p_high - p_low)
+                normalized[:,:,i] = channel_norm
+            else:
+                # Channel is constant
+                normalized[:,:,i] = 0
+        return (normalized * 255).astype(np.uint8)
+    else:
+        # Single channel
+        p_low = np.percentile(img, percentile_clip)
+        p_high = np.percentile(img, 100 - percentile_clip)
+        
+        if p_high - p_low > 1e-6:
+            img_norm = np.clip(img, p_low, p_high)
+            img_norm = (img_norm - p_low) / (p_high - p_low)
+            return (img_norm * 255).astype(np.uint8)
+        else:
+            return np.zeros_like(img, dtype=np.uint8)
 
-
-def geotiff_to_png_gdal(input_path, output_path=None, force_grayscale=False, 
-                       enhance_depth=True, save_lossless=True):
+def convert_tif_to_rgb(tif_path, output_path, format='png', quality=95, debug=False):
     """
-    Convert GeoTIFF to PNG with improved depth visualization
+    Convert TIF file to RGB format suitable for VGGT.
     
     Args:
-        input_path: Path to GeoTIFF file
-        output_path: Output PNG path (optional)
-        force_grayscale: Force grayscale output
-        enhance_depth: Apply contrast enhancement to depth data
-        save_lossless: Also save 16-bit version for depth data
+        tif_path: Path to input TIF file
+        output_path: Path for output file
+        format: Output format ('png' or 'jpg')
+        quality: JPEG quality (1-100), only used for JPEG
+        debug: If True, save intermediate visualization steps
+    
+    Returns:
+        bool: True if successful, False otherwise
     """
-    if output_path is None:
-        output_path = os.path.splitext(input_path)[0] + '.png'
-    
-    # Open the dataset
-    dataset = gdal.Open(input_path, gdal.GA_ReadOnly)
-    if dataset is None:
-        print(f"Error: Could not open {input_path}")
-        return
-    
-    # Get dimensions
-    width = dataset.RasterXSize
-    height = dataset.RasterYSize
-    bands = dataset.RasterCount
-    
-    print(f"\nProcessing: {os.path.basename(input_path)}")
-    print(f"Dimensions: {width}x{height}, {bands} bands")
-    
-    # Check if this is a depth/elevation file
-    is_depth = any(keyword in input_path.lower() for keyword in 
-                  ['depth', 'elevation', '3dep', 'dem', 'dtm', 'dsm'])
-    
-    # Handle multi-band depth files (DEPTH_MULTI)
-    if is_depth and bands > 1:
-        print(f"\nDetected multi-band depth file with {bands} bands")
-        print("Processing elevation band (band 1) for primary output")
+    try:
+        # First try with OpenCV (often handles difficult TIFs better)
+        img = cv2.imread(tif_path, cv2.IMREAD_UNCHANGED)
         
-        # Save each band separately for analysis
-        band_names = ['elevation', 'slope', 'aspect', 'hillshade']
-        for i in range(min(bands, len(band_names))):
-            band_data = dataset.GetRasterBand(i + 1).ReadAsArray()
-            band_output = os.path.splitext(output_path)[0] + f'_{band_names[i]}.png'
-            
-            # Process each band
-            process_single_band(band_data, band_output, band_names[i], 
-                              dataset.GetRasterBand(i + 1).GetNoDataValue(),
-                              enhance_depth and i == 0)  # Only enhance elevation
-            
-        # Use elevation (band 1) for main output
-        band_data = dataset.GetRasterBand(1).ReadAsArray()
-        nodata = dataset.GetRasterBand(1).GetNoDataValue()
+        if img is None:
+            # Fallback to PIL
+            try:
+                pil_img = Image.open(tif_path)
+                img = np.array(pil_img)
+            except Exception as e:
+                print(f"Error: Cannot read {tif_path} with either OpenCV or PIL: {e}")
+                return False
         
-    elif bands >= 3 and not (is_depth or force_grayscale):
-        # RGB image processing (unchanged)
-        r = dataset.GetRasterBand(1).ReadAsArray()
-        g = dataset.GetRasterBand(2).ReadAsArray()
-        b = dataset.GetRasterBand(3).ReadAsArray()
+        # Handle different image formats
+        original_dtype = img.dtype
+        original_shape = img.shape
         
-        # Stack bands
-        rgb = np.dstack((r, g, b))
+        print(f"\nProcessing: {os.path.basename(tif_path)}")
+        print(f"  Input shape: {original_shape}, dtype: {original_dtype}")
         
-        # Normalize each band to 0-255
-        rgb_normalized = np.zeros_like(rgb, dtype=np.uint8)
-        
-        for i in range(3):
-            band = rgb[:, :, i]
-            # Handle NaN and invalid values
-            valid_mask = ~np.isnan(band) & (band != dataset.GetRasterBand(i+1).GetNoDataValue())
-            valid_data = band[valid_mask]
-            
-            if len(valid_data) > 0:
-                # Use full range for RGB to maintain quality
-                pmin = np.min(valid_data)
-                pmax = np.max(valid_data)
+        # Convert different data types to uint8
+        if img.dtype == np.uint16:
+            # Check the actual range of values
+            actual_max = img.max()
+            if actual_max <= 255:
+                # Values are already in 8-bit range
+                img = img.astype(np.uint8)
+            elif actual_max <= 4095:
+                # 12-bit data
+                img = (img / 16).astype(np.uint8)
+            else:
+                # Full 16-bit
+                img = (img / 256).astype(np.uint8)
                 
-                if pmax > pmin:
-                    # Normalize and clip
-                    band_norm = (band - pmin) / (pmax - pmin)
-                    band_norm = np.clip(band_norm, 0, 1)
-                    rgb_normalized[:, :, i] = (band_norm * 255).astype(np.uint8)
+        elif img.dtype == np.float32 or img.dtype == np.float64:
+            # For float images, we need to check the actual range
+            img_min, img_max = img.min(), img.max()
+            print(f"  Float range: [{img_min:.4f}, {img_max:.4f}]")
+            
+            if img_min >= 0 and img_max <= 1.0:
+                # Already normalized to [0, 1]
+                img = (img * 255).astype(np.uint8)
+            elif img_min >= 0 and img_max <= 255:
+                # Float values in byte range
+                img = img.astype(np.uint8)
+            else:
+                # Use robust normalization for arbitrary float ranges
+                # This handles outliers better
+                img = robust_normalize(img, percentile_clip=0.5)
+                
+        elif img.dtype != np.uint8:
+            # For other types, use robust normalization
+            img = robust_normalize(img, percentile_clip=0.5)
         
-        # Save as RGB
-        Image.fromarray(rgb_normalized, 'RGB').save(output_path, 'PNG')
-        print(f"Saved RGB image: {output_path}")
-        dataset = None
-        return
+        # Handle different channel configurations
+        if len(img.shape) == 2:
+            # Grayscale to RGB
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        elif len(img.shape) == 3:
+            if img.shape[2] == 1:
+                # Single channel to RGB
+                img = cv2.cvtColor(img.squeeze(), cv2.COLOR_GRAY2RGB)
+            elif img.shape[2] == 3:
+                # BGR to RGB (OpenCV uses BGR by default)
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            elif img.shape[2] == 4:
+                # BGRA/RGBA to RGB
+                # Check if alpha channel has any transparency
+                if img[:,:,3].min() < 255:
+                    # Handle transparency by blending with white background
+                    alpha = img[:,:,3:4] / 255.0
+                    rgb = img[:,:,:3]
+                    white_bg = np.ones_like(rgb) * 255
+                    img = (rgb * alpha + white_bg * (1 - alpha)).astype(np.uint8)
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                else:
+                    # No transparency, just drop alpha
+                    img = cv2.cvtColor(img[:,:,:3], cv2.COLOR_BGR2RGB)
+            else:
+                # Multi-channel image (e.g., multispectral)
+                print(f"Warning: {tif_path} has {img.shape[2]} channels. Using first 3.")
+                if img.shape[2] >= 3:
+                    img = img[:,:,:3]
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                else:
+                    # Less than 3 channels, replicate to make RGB
+                    img = np.stack([img[:,:,0]] * 3, axis=2)
         
-    else:
-        # Single band processing
-        band_data = dataset.GetRasterBand(1).ReadAsArray()
-        nodata = dataset.GetRasterBand(1).GetNoDataValue()
-    
-    # Process single band data
-    dataset = None
-    process_single_band(band_data, output_path, 'depth' if is_depth else 'grayscale', 
-                       nodata, enhance_depth and is_depth, save_lossless and is_depth)
-
-
-def process_single_band(band_data, output_path, data_type, nodata, 
-                       enhance=True, save_lossless=True):
-    """
-    Process single band data with enhancement options
-    """
-    # Create mask for valid data
-    if nodata is not None:
-        valid_mask = (band_data != nodata) & ~np.isnan(band_data)
-    else:
-        valid_mask = ~np.isnan(band_data)
-    
-    valid_data = band_data[valid_mask]
-    
-    if len(valid_data) == 0:
-        print("Error: No valid data found")
-        return
-    
-    # Calculate statistics
-    data_min = float(np.min(valid_data))
-    data_max = float(np.max(valid_data))
-    data_mean = float(np.mean(valid_data))
-    data_std = float(np.std(valid_data))
-    
-    print(f"\n{data_type} statistics:")
-    print(f"  Min: {data_min:.2f}")
-    print(f"  Max: {data_max:.2f}")
-    print(f"  Mean: {data_mean:.2f}")
-    print(f"  Std: {data_std:.2f}")
-    
-    # Save 16-bit lossless version first (if requested)
-    if save_lossless and data_type in ['depth', 'elevation']:
-        lossless_path = os.path.splitext(output_path)[0] + '_16bit.png'
-        save_16bit_lossless(band_data, valid_mask, data_min, data_max, lossless_path)
-    
-    # Create enhanced 8-bit visualization
-    if enhance and data_type in ['depth', 'elevation']:
-        print("\nApplying contrast enhancement for better visualization...")
+        # Apply histogram equalization if image looks too dark or too bright
+        mean_val = img.mean()
+        if mean_val < 30 or mean_val > 225:
+            print(f"  Applying histogram equalization (mean: {mean_val:.1f})")
+            # Convert to LAB color space
+            lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+            l, a, b = cv2.split(lab)
+            # Apply CLAHE to L channel
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            l = clahe.apply(l)
+            # Merge and convert back
+            lab = cv2.merge([l, a, b])
+            img = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
         
-        # Method 1: Histogram equalization
-        enhanced_data = histogram_equalize(band_data, valid_mask)
+        # Ensure we have a valid RGB image
+        assert img.shape[2] == 3, f"Expected 3 channels, got {img.shape[2]}"
+        assert img.dtype == np.uint8, f"Expected uint8, got {img.dtype}"
         
-        # Method 2: Alternative - use standard deviation stretch
-        # enhanced_data = std_stretch(band_data, valid_mask, data_mean, data_std)
+        # Save the image
+        pil_img = Image.fromarray(img)
         
-    else:
-        # Standard normalization
-        pmin = np.percentile(valid_data, 2)
-        pmax = np.percentile(valid_data, 98)
-        
-        if pmax > pmin:
-            enhanced_data = (band_data - pmin) / (pmax - pmin)
-            enhanced_data = np.clip(enhanced_data, 0, 1) * 255
+        if format.lower() == 'png':
+            pil_img.save(output_path, 'PNG', optimize=True)
+        elif format.lower() in ['jpg', 'jpeg']:
+            pil_img.save(output_path, 'JPEG', quality=quality, optimize=True)
         else:
-            enhanced_data = np.zeros_like(band_data)
-    
-    # Convert to uint8 and set invalid pixels
-    output_8bit = enhanced_data.astype(np.uint8)
-    output_8bit[~valid_mask] = 0
-    
-    # Save 8-bit visualization
-    Image.fromarray(output_8bit, 'L').save(output_path)
-    print(f"Saved {data_type} visualization: {output_path}")
-
-
-def histogram_equalize(data, valid_mask):
-    """
-    Apply histogram equalization for better contrast
-    """
-    valid_data = data[valid_mask]
-    
-    # Create histogram
-    hist, bins = np.histogram(valid_data, bins=256)
-    
-    # Calculate CDF
-    cdf = hist.cumsum()
-    cdf_normalized = cdf * 255.0 / cdf[-1]
-    
-    # Interpolate
-    output = np.zeros_like(data)
-    valid_min = valid_data.min()
-    valid_max = valid_data.max()
-    
-    if valid_max > valid_min:
-        # Map values to bins
-        normalized = (data - valid_min) / (valid_max - valid_min)
-        indices = np.clip((normalized * 255).astype(int), 0, 255)
-        output = cdf_normalized[indices]
-    
-    return output
-
-
-def std_stretch(data, valid_mask, mean, std, n_std=2.5):
-    """
-    Stretch data based on standard deviation
-    """
-    lower = mean - n_std * std
-    upper = mean + n_std * std
-    
-    stretched = (data - lower) / (upper - lower)
-    stretched = np.clip(stretched, 0, 1) * 255
-    
-    return stretched
-
-
-def save_16bit_lossless(data, valid_mask, data_min, data_max, output_path):
-    """
-    Save as 16-bit PNG with metadata for lossless storage
-    """
-    if data_max > data_min:
-        scale_factor = 65535.0 / (data_max - data_min)
-        normalized = (data - data_min) * scale_factor
-        normalized[~valid_mask] = 0
+            raise ValueError(f"Unsupported format: {format}")
         
-        # Convert to 16-bit
-        data_16bit = np.clip(normalized, 0, 65535).astype(np.uint16)
+        # Log conversion info
+        print(f"✓ Converted successfully")
+        print(f"  Output: {img.shape}, {img.dtype}")
+        print(f"  Saved to: {output_path}")
         
-        # Save as 16-bit PNG
-        Image.fromarray(data_16bit, mode='I;16').save(output_path)
+        return True
         
-        # Save metadata
-        metadata = {
-            'original_min': data_min,
-            'original_max': data_max,
-            'scale_factor': float(scale_factor),
-            'reconstruction_formula': 'original_value = (png_value / scale_factor) + original_min'
-        }
-        
-        metadata_path = os.path.splitext(output_path)[0] + '_metadata.json'
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
-        
-        print(f"Saved 16-bit lossless version: {output_path}")
+    except Exception as e:
+        print(f"Error converting {tif_path}: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
+def convert_folder(input_folder, output_folder, format='png', quality=95, check_only=False):
+    """
+    Convert all TIF files in a folder to RGB format.
+    
+    Args:
+        input_folder: Path to folder containing TIF files
+        output_folder: Path to save converted images
+        format: Output format ('png' or 'jpg')
+        quality: JPEG quality (1-100)
+        check_only: If True, only check TIF properties without converting
+    """
+    # Create output directory
+    os.makedirs(output_folder, exist_ok=True)
+    
+    # Find all TIF files
+    tif_patterns = ['*.tif', '*.tiff', '*.TIF', '*.TIFF']
+    tif_files = []
+    for pattern in tif_patterns:
+        tif_files.extend(Path(input_folder).glob(pattern))
+    
+    if not tif_files:
+        print(f"No TIF files found in {input_folder}")
+        return
+    
+    print(f"Found {len(tif_files)} TIF files")
+    
+    if check_only:
+        # Just check properties
+        for tif_path in tif_files:
+            check_tif_properties(str(tif_path))
+        return
+    
+    # Convert files
+    successful = 0
+    failed = 0
+    
+    for tif_path in tqdm(tif_files, desc="Converting TIF files"):
+        # Generate output filename
+        output_name = tif_path.stem + f'.{format.lower()}'
+        output_path = os.path.join(output_folder, output_name)
+        
+        if convert_tif_to_rgb(str(tif_path), output_path, format, quality):
+            successful += 1
+        else:
+            failed += 1
+    
+    print(f"\nConversion complete!")
+    print(f"  Successful: {successful}")
+    print(f"  Failed: {failed}")
+    
+    if failed > 0:
+        print("\nFailed files might need special handling.")
+        print("Try running with --check flag to inspect their properties.")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Convert TIF files to RGB format suitable for VGGT",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Convert single file to PNG
+  python tif_convert.py --input test.tif --output test.png
+  
+  # Convert all TIF files in folder to PNG
+  python tif_convert.py --input_folder ./tif_images --output_folder ./png_images
+  
+  # Convert to JPEG with custom quality
+  python tif_convert.py --input_folder ./tif_images --output_folder ./jpg_images --format jpg --quality 90
+  
+  # Check TIF properties without converting
+  python tif_convert.py --input test.tif --check
+        """
+    )
+    
+    # Input options (mutually exclusive)
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument('--input', type=str, help='Path to single TIF file')
+    input_group.add_argument('--input_folder', type=str, help='Path to folder containing TIF files')
+    
+    # Output options
+    parser.add_argument('--output', type=str, help='Output path for single file conversion')
+    parser.add_argument('--output_folder', type=str, help='Output folder for batch conversion')
+    
+    # Format options
+    parser.add_argument('--format', type=str, default='png', choices=['png', 'jpg', 'jpeg'],
+                        help='Output format (default: png)')
+    parser.add_argument('--quality', type=int, default=95,
+                        help='JPEG quality 1-100 (default: 95, only for JPEG format)')
+    
+    # Other options
+    parser.add_argument('--check', action='store_true',
+                        help='Check TIF properties without converting')
+    
+    args = parser.parse_args()
+    
+    # Validate arguments
+    if args.input and not args.check:
+        if not args.output:
+            # Auto-generate output filename
+            input_path = Path(args.input)
+            args.output = str(input_path.with_suffix(f'.{args.format.lower()}'))
+            print(f"Output path not specified, using: {args.output}")
+    
+    if args.input_folder and not args.check:
+        if not args.output_folder:
+            args.output_folder = args.input_folder + '_converted'
+            print(f"Output folder not specified, using: {args.output_folder}")
+    
+    # Process based on mode
+    if args.input:
+        # Single file mode
+        if args.check:
+            check_tif_properties(args.input)
+        else:
+            success = convert_tif_to_rgb(args.input, args.output, args.format, args.quality)
+            if success:
+                print(f"Successfully converted to: {args.output}")
+            else:
+                print("Conversion failed!")
+    else:
+        # Folder mode
+        convert_folder(args.input_folder, args.output_folder, args.format, args.quality, args.check)
 
 if __name__ == "__main__":
-    # Process your files
-    # This will create multiple outputs for better analysis
-    geotiff_to_png_gdal('output/washington_dc_1m_3DEP_ELEVATION_1m_20250719_231011.tif')
-    geotiff_to_png_gdal('output/washington_dc_1m_3DEP_DEPTH_MULTI_1m_20250719_231012.tif')
+    main()
