@@ -148,7 +148,4 @@ skyseg.onnx
 .pixi
 *.egg-info
 
-eogs_dataset
-opengeos/output
-vggt_output/
-vggt_models/
+model
