@@ -74,7 +74,7 @@ def process_image(image_path, output_dir, model, device, dtype, vis_dir=None):
     
     # Save depth map
     depth_norm = normalize_depth_for_visualization(depth_map)
-    depth_path = os.path.join(output_dir, f"{frame_name}.png")
+    depth_path = os.path.join(output_dir, f"{frame_name}_depth.png")
     Image.fromarray(depth_norm).save(depth_path)
     
     # Save visualization if requested
@@ -91,16 +91,49 @@ def process_image(image_path, output_dir, model, device, dtype, vis_dir=None):
         }
     }
 
+def load_model_from_pt(model_path, device):
+    """
+    Load VGGT model from a local .pt file.
+    
+    Args:
+        model_path: Path to the .pt model file
+        device: Device to load the model on
+    
+    Returns:
+        Loaded VGGT model
+    """
+    print(f"Loading model from: {model_path}")
+    
+    # Initialize the model architecture
+    model = VGGT()
+    
+    # Load the state dict from the .pt file
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+    
+    # Load state dict with map_location for proper device handling
+    state_dict = torch.load(model_path, map_location=device)
+    
+    # Load the state dict into the model
+    model.load_state_dict(state_dict)
+    
+    # Move model to device and set to eval mode
+    model = model.to(device)
+    model.eval()
+    
+    print("Model loaded successfully!")
+    return model
+
 def main():
     parser = argparse.ArgumentParser(description="VGGT depth and camera prediction")
     parser.add_argument("--input", type=str, required=True, 
                         help="Path to image file or directory containing images")
-    parser.add_argument("--output", type=str, default="vggt_output", 
-                        help="Output directory (default: vggt_output)")
+    parser.add_argument("--output", type=str, default="vggt_output1", 
+                        help="Output directory")
     parser.add_argument("--vis", type=str, default=None, 
                         help="Path to save visualizations (default: None)")
-    parser.add_argument("--cache_dir", type=str, default="model", 
-                        help="Directory to cache VGGT model")
+    parser.add_argument("--model_path", type=str, default="model/vggt_1B.pt", 
+                        help="Path to the VGGT model .pt file")
     
     args = parser.parse_args()
     
@@ -128,14 +161,23 @@ def main():
         print(f"Error: {input_path} is neither a file nor a directory")
         return
     
-    # Setup model
+    # Setup device and dtype
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 else torch.float16
     
     print(f"Using device: {device}")
-    print("Loading VGGT model...")
-    model = VGGT.from_pretrained("facebook/VGGT-1B-Commercial", cache_dir=args.cache_dir).to(device)
-    model.eval()
+    print(f"Using dtype: {dtype}")
+    
+    # Load model from local .pt file
+    try:
+        model = load_model_from_pt(args.model_path, device)
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        print(f"Please ensure the model file exists at: {args.model_path}")
+        return
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        return
     
     # Process images
     all_camera_params = {}
