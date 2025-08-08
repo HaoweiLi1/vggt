@@ -32,6 +32,18 @@ data:
           split: train
           CO3D_DIR: /YOUR/PATH/TO/CO3D
           CO3D_ANNOTATION_DIR: /YOUR/PATH/TO/CO3D_ANNOTATION
+      # dataset_configs:
+      #   - _target_: data.datasets.megadepth_aerial.MegaDepthAerialDataset
+      #     split: train
+      #     ROOT: /home/haowei/Documents/aerial-megadepth/megadepth_aerial_processed
+      #     split_file: train.npz  # Your merged NPZ
+      #     segmentation_root: null  # Add path if you have segmentation masks
+      #     len_train: 10000  # Adjust based on your needs
+      #     max_depth: 1500.0  # Aerial-specific depth threshold
+      #     depth_percentile: 98.0
+      #     use_pairs: true
+      #     expand_ratio: 2
+      
   val:
     _target_: data.dynamic_dataloader.DynamicTorchDataset
     num_workers: ${num_workers}

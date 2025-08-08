@@ -149,3 +149,4 @@ skyseg.onnx
 *.egg-info
 
 model
+training/dataset_*
