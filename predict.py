@@ -128,7 +128,7 @@ def main():
     parser = argparse.ArgumentParser(description="VGGT depth and camera prediction")
     parser.add_argument("--input", type=str, required=True, 
                         help="Path to image file or directory containing images")
-    parser.add_argument("--output", type=str, default="vggt_output1", 
+    parser.add_argument("--output", type=str, default="vggt_output", 
                         help="Output directory")
     parser.add_argument("--vis", type=str, default=None, 
                         help="Path to save visualizations (default: None)")
