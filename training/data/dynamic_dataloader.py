@@ -9,10 +9,13 @@ from typing import Callable, Optional
 from hydra.utils import instantiate
 import random
 import numpy as np
+import logging
 from torch.utils.data import DataLoader, Dataset, DistributedSampler, IterableDataset, Sampler
 from abc import ABC, abstractmethod
 
 from .worker_fn import get_worker_init_fn
+
+logger = logging.getLogger(__name__)
 
 class DynamicTorchDataset(ABC):
     def __init__(
@@ -133,6 +136,9 @@ class DynamicBatchSampler(Sampler):
 
         # Maximum image number per GPU
         self.max_img_per_gpu = max_img_per_gpu
+
+        # Validate configuration
+        self._validate_configuration()
 
         # Set the epoch for the sampler
         self.set_epoch(epoch + seed)

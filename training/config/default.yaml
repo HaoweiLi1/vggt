@@ -8,7 +8,7 @@ seed_value: 42
 accum_steps: 2    # We did not use gradient accumulation in our training, while if you suffer from OOM, you can try to use it.
 patch_size: 14
 val_epoch_freq: 5
-max_img_per_gpu: 16
+max_img_per_gpu: 8
 
 limit_train_batches: 800
 limit_val_batches: null
@@ -35,7 +35,7 @@ data:
       dataset_configs:
         - _target_: data.datasets.megadepth_aerial.MegaDepthAerialDataset
           split: train
-          ROOT: /home/haowei/Documents/vggt/training/dataset_aerialmegadepth
+          ROOT: /home/haowei/Documents/vggt/training/dataset_aerialmegadepth_cropped
           split_file: train.npz  # Your merged NPZ
           segmentation_root: null  # Add path if you have segmentation masks
           max_depth: 1500.0  # Aerial-specific depth threshold
