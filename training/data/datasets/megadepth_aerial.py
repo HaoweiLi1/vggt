@@ -309,7 +309,6 @@ class MegaDepthAerialDataset(BaseDataset):
                 
             except Exception as e:
                 logging.warning(f"Failed to load image {img_id}: {e}")
-            continue
         
         # Ensure we have at least 2 images
         if successfully_loaded < 2:

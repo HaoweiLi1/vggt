@@ -143,6 +143,63 @@ class DynamicBatchSampler(Sampler):
         # Set the epoch for the sampler
         self.set_epoch(epoch + seed)
 
+    def _validate_configuration(self):
+        """
+        验证配置参数的有效性
+        
+        Raises:
+            ValueError: 当配置参数不符合要求时抛出
+        """
+        # 验证 aspect_ratio_range (支持 list, tuple 和 omegaconf.ListConfig 等可索引类型)
+        try:
+            if len(self.aspect_ratio_range) != 2:
+                raise ValueError(
+                    f"aspect_ratio_range 必须是长度为2的序列，got length={len(self.aspect_ratio_range)}, value={self.aspect_ratio_range}"
+                )
+            if self.aspect_ratio_range[0] <= 0 or self.aspect_ratio_range[1] <= 0:
+                raise ValueError(
+                    f"aspect_ratio_range 的值必须为正数，got {self.aspect_ratio_range}"
+                )
+            if self.aspect_ratio_range[0] > self.aspect_ratio_range[1]:
+                raise ValueError(
+                    f"aspect_ratio_range 必须满足 min <= max，got {self.aspect_ratio_range}"
+                )
+        except (TypeError, AttributeError) as e:
+            raise ValueError(
+                f"aspect_ratio_range 必须是可索引的序列类型，got {type(self.aspect_ratio_range)}: {self.aspect_ratio_range}"
+            ) from e
+        
+        # 验证 image_num_range (支持 list, tuple 和 omegaconf.ListConfig 等可索引类型)
+        try:
+            if len(self.image_num_range) != 2:
+                raise ValueError(
+                    f"image_num_range 必须是长度为2的序列，got length={len(self.image_num_range)}, value={self.image_num_range}"
+                )
+            if self.image_num_range[0] < 1:
+                raise ValueError(
+                    f"image_num_range 的最小值必须 >= 1，got {self.image_num_range}"
+                )
+            if self.image_num_range[0] > self.image_num_range[1]:
+                raise ValueError(
+                    f"image_num_range 必须满足 min <= max，got {self.image_num_range}"
+                )
+        except (TypeError, AttributeError) as e:
+            raise ValueError(
+                f"image_num_range 必须是可索引的序列类型，got {type(self.image_num_range)}: {self.image_num_range}"
+            ) from e
+        
+        # 验证 max_img_per_gpu
+        if not isinstance(self.max_img_per_gpu, (int, float)) or self.max_img_per_gpu <= 0:
+            raise ValueError(
+                f"max_img_per_gpu 必须是正数，got {self.max_img_per_gpu}"
+            )
+        
+        # 验证 possible_nums 非空
+        if len(self.possible_nums) == 0:
+            raise ValueError(
+                f"possible_nums 不能为空，请检查 image_num_range 配置: {self.image_num_range}"
+            )
+
     def set_epoch(self, epoch):
         """
         Sets the epoch for this sampler, affecting the random sequence.
