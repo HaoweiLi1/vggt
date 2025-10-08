@@ -56,11 +56,14 @@ class MegaDepthAerialDataset(BaseDataset):
         
         # Check which scenes actually exist on disk
         self.valid_scenes = []
-        for scene in ['0000', '0001']:  # Only check for scenes you have
-            scene_path = osp.join(self.ROOT, scene)
-            if osp.exists(scene_path):
-                self.valid_scenes.append(scene)
-                logging.info(f"Found scene directory: {scene}")
+        # Automatically detect all scene directories
+        if osp.exists(self.ROOT):
+            for item in os.listdir(self.ROOT):
+                scene_path = osp.join(self.ROOT, item)
+                if osp.isdir(scene_path) and not item.startswith('.'):
+                    self.valid_scenes.append(item)
+                    logging.info(f"Found scene directory: {item}")
+        self.valid_scenes = sorted(self.valid_scenes)
         
         if not self.valid_scenes:
             raise RuntimeError(f"No valid scene directories found in {self.ROOT}")

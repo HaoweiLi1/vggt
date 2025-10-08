@@ -713,8 +713,11 @@ class Trainer:
         
         return batch
 
-    def _process_batch(self, batch: Mapping):      
-        if self.data_conf.train.common_config.repeat_batch:
+    def _process_batch(self, batch: Mapping):
+        # Only apply batch repetition during training
+        if hasattr(self.data_conf, 'train') and \
+           hasattr(self.data_conf.train, 'common_config') and \
+           self.data_conf.train.common_config.repeat_batch:
             batch = self._apply_batch_repetition(batch)
         
         # Normalize camera extrinsics and points. The function returns new tensors.
