@@ -1,14 +1,14 @@
 defaults:
   - default_dataset.yaml
 
-exp_name: aerial_megadepth_finetune
+exp_name: aerial_megadepth_finetune2
 img_size: 518
 num_workers: 8
 seed_value: 42
 accum_steps: 2    # We did not use gradient accumulation in our training, while if you suffer from OOM, you can try to use it.
 patch_size: 14
-val_epoch_freq: 5
-max_img_per_gpu: 16
+val_epoch_freq: 200
+max_img_per_gpu: 48
 
 limit_train_batches: 800
 limit_val_batches: null
@@ -35,10 +35,10 @@ data:
       dataset_configs:
         - _target_: data.datasets.megadepth_aerial.MegaDepthAerialDataset
           split: train
-          ROOT: /home/haowei/Documents/vggt/training/dataset_aerialmegadepth
-          split_file: train.npz  # Your merged NPZ
-          segmentation_root: null  # Add path if you have segmentation masks
-          max_depth: 1500.0  # Aerial-specific depth threshold
+          ROOT: /media/hdd2/users/haowei/Data/megadepth_aerial_cropped
+          split_file: /media/hdd2/users/haowei/aerial-megadepth/data_generation/data_splits/aerial_megadepth_train_part2.npz  
+          segmentation_root: null  
+          max_depth: 1000.0  # Aerial-specific depth threshold
           depth_percentile: 98.0
           use_pairs: true
           expand_ratio: 2
@@ -97,7 +97,7 @@ logging:
 checkpoint:
   save_dir: logs/${exp_name}/ckpts
   save_freq: 5
-  resume_checkpoint_path: /home/haowei/Documents/vggt/model/vggt_1B.pt
+  resume_checkpoint_path: /media/hdd2/users/haowei/vggt/model/vggt_1B.pt
   strict: False
 
 
@@ -107,7 +107,7 @@ loss:
     weight: 5.0
     loss_type: "l1" # The paper uses smooth l1 loss, but we found l1 loss is more stable than smooth l1 and l2 loss.  
   depth:
-    weight: 1.0
+    weight: 3.0
     gradient_loss_fn: "grad" 
     valid_range: 0.98
   point: null
@@ -157,8 +157,8 @@ optim:
               end_value: 5e-5
             - _target_: fvcore.common.param_scheduler.CosineParamScheduler
               start_value: 5e-5
-              end_value: 1e-8
-          lengths: [0.05, 0.95]
+              end_value: 1e-7
+          lengths: [0.1, 0.9]
           interval_scaling: ['rescaled', 'rescaled']
     weight_decay:
       - scheduler:
@@ -168,7 +168,7 @@ optim:
 
 
 
-max_epochs: 20
+max_epochs: 100
 
 model:
   _target_: vggt.models.vggt.VGGT

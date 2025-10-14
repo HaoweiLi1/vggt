@@ -150,3 +150,5 @@ skyseg.onnx
 
 model
 training/dataset_*
+training/logs/
+eval_results*/
