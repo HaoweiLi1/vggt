@@ -1,18 +1,18 @@
 defaults:
   - default_dataset.yaml
 
-exp_name: aerial_megadepth_finetune
+exp_name: aerial_megadepth_vit_features
 img_size: 518
 num_workers: 4
 seed_value: 42
-accum_steps: 2    # We did not use gradient accumulation in our training, while if you suffer from OOM, you can try to use it.
+accum_steps: 1    # Set to 1 for testing ViT feature fusion
 patch_size: 14
 val_epoch_freq: 2  # Run validation every N epochs (set to 1 for every epoch)
-max_img_per_gpu: 8
+max_img_per_gpu: 4  # Reduced for safety with new fusion modules
 
-# Limit batches for debugging (set to null to use all data)
-limit_train_batches: 100  # Limit training batches per epoch
-limit_val_batches: 100  # Limit validation batches (null = use all validation data)
+# Limit batches for quick testing (set to null to use all data)
+limit_train_batches: 10  # Quick test: only 10 batches
+limit_val_batches: 5  # Quick test: only 5 validation batches
 
 
 data:
@@ -171,7 +171,7 @@ optim:
 
 
 
-max_epochs: 10
+max_epochs: 1  # Quick test: 1 epoch only
 
 model:
   _target_: vggt.models.vggt.VGGT
@@ -179,6 +179,7 @@ model:
   enable_depth: True
   enable_point: False
   enable_track: False
+  use_vit_features: True  # ENABLED: ViT feature fusion (extracts Block 6 & 24, fuses with element-wise addition)
 
 
 distributed:

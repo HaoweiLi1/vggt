@@ -16,15 +16,30 @@ from vggt.heads.track_head import TrackHead
 
 class VGGT(nn.Module, PyTorchModelHubMixin):
     def __init__(self, img_size=518, patch_size=14, embed_dim=1024,
-                 enable_camera=True, enable_point=True, enable_depth=True, enable_track=True):
+                 enable_camera=True, enable_point=True, enable_depth=True, enable_track=True,
+                 use_vit_features=False):  # NEW parameter
         super().__init__()
 
         self.aggregator = Aggregator(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim)
 
         self.camera_head = CameraHead(dim_in=2 * embed_dim) if enable_camera else None
         self.point_head = DPTHead(dim_in=2 * embed_dim, output_dim=4, activation="inv_log", conf_activation="expp1") if enable_point else None
-        self.depth_head = DPTHead(dim_in=2 * embed_dim, output_dim=2, activation="exp", conf_activation="expp1") if enable_depth else None
+        
+        # NEW: Create depth head with optional ViT feature fusion
+        if enable_depth:
+            self.depth_head = DPTHead(
+                dim_in=2 * embed_dim,
+                output_dim=2,
+                activation="exp",
+                conf_activation="expp1",
+                use_vit_features=use_vit_features  # NEW
+            )
+        else:
+            self.depth_head = None
+            
         self.track_head = TrackHead(dim_in=2 * embed_dim, patch_size=patch_size) if enable_track else None
+        
+        self.use_vit_features = use_vit_features  # Store for forward
 
     def forward(self, images: torch.Tensor, query_points: torch.Tensor = None):
         """
@@ -58,7 +73,14 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         if query_points is not None and len(query_points.shape) == 2:
             query_points = query_points.unsqueeze(0)
 
-        aggregated_tokens_list, patch_start_idx = self.aggregator(images)
+        # NEW: Call aggregator with optional ViT feature extraction
+        if self.use_vit_features:
+            result = self.aggregator(images, extract_vit_features=True)
+            aggregated_tokens_list, patch_start_idx, vit_early, vit_final = result
+        else:
+            result = self.aggregator(images, extract_vit_features=False)
+            aggregated_tokens_list, patch_start_idx = result
+            vit_early, vit_final = None, None
 
         predictions = {}
 
@@ -68,9 +90,14 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
                 predictions["pose_enc"] = pose_enc_list[-1]  # pose encoding of the last iteration
                 predictions["pose_enc_list"] = pose_enc_list
                 
+            # NEW: Pass ViT features to depth head
             if self.depth_head is not None:
                 depth, depth_conf = self.depth_head(
-                    aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx
+                    aggregated_tokens_list,
+                    images=images,
+                    patch_start_idx=patch_start_idx,
+                    vit_early=vit_early,  # NEW
+                    vit_final=vit_final   # NEW
                 )
                 predictions["depth"] = depth
                 predictions["depth_conf"] = depth_conf

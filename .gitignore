@@ -152,3 +152,6 @@ model
 training/dataset_*
 logs
 training/logs
+backup/
+.kiro/
+*.pdf

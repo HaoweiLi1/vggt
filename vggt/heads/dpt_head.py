@@ -53,6 +53,8 @@ class DPTHead(nn.Module):
         pos_embed: bool = True,
         feature_only: bool = False,
         down_ratio: int = 1,
+        use_vit_features: bool = False,  # NEW
+        vit_dim: int = 1024,  # NEW
     ) -> None:
         super(DPTHead, self).__init__()
         self.patch_size = patch_size
@@ -62,6 +64,7 @@ class DPTHead(nn.Module):
         self.feature_only = feature_only
         self.down_ratio = down_ratio
         self.intermediate_layer_idx = intermediate_layer_idx
+        self.use_vit_features = use_vit_features  # NEW
 
         self.norm = nn.LayerNorm(dim_in)
 
@@ -111,6 +114,31 @@ class DPTHead(nn.Module):
                 nn.ReLU(inplace=True),
                 nn.Conv2d(head_features_2, output_dim, kernel_size=1, stride=1, padding=0),
             )
+        
+        # NEW: ViT feature processing (following HQ-SAM)
+        if use_vit_features:
+            # Upsample early ViT: 37×37 → 148×148
+            self.compress_vit_early = nn.Sequential(
+                nn.ConvTranspose2d(vit_dim, features, kernel_size=2, stride=2),
+                nn.BatchNorm2d(features),
+                nn.GELU(),
+                nn.ConvTranspose2d(features, features, kernel_size=2, stride=2)
+            )
+            
+            # Upsample final ViT: 37×37 → 148×148
+            self.compress_vit_final = nn.Sequential(
+                nn.ConvTranspose2d(vit_dim, features, kernel_size=2, stride=2),
+                nn.BatchNorm2d(features),
+                nn.GELU(),
+                nn.ConvTranspose2d(features, features, kernel_size=2, stride=2)
+            )
+            
+            # Fusion refinement
+            self.fusion_conv = nn.Sequential(
+                nn.Conv2d(features, features, kernel_size=3, padding=1),
+                nn.BatchNorm2d(features),
+                nn.GELU()
+            )
 
     def forward(
         self,
@@ -118,6 +146,8 @@ class DPTHead(nn.Module):
         images: torch.Tensor,
         patch_start_idx: int,
         frames_chunk_size: int = 8,
+        vit_early: torch.Tensor = None,  # NEW
+        vit_final: torch.Tensor = None,  # NEW
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Forward pass through the DPT head, supports processing by chunking frames.
@@ -138,7 +168,7 @@ class DPTHead(nn.Module):
 
         # If frames_chunk_size is not specified or greater than S, process all frames at once
         if frames_chunk_size is None or frames_chunk_size >= S:
-            return self._forward_impl(aggregated_tokens_list, images, patch_start_idx)
+            return self._forward_impl(aggregated_tokens_list, images, patch_start_idx, vit_early=vit_early, vit_final=vit_final)
 
         # Otherwise, process frames in chunks to manage memory usage
         assert frames_chunk_size > 0
@@ -153,12 +183,12 @@ class DPTHead(nn.Module):
             # Process batch of frames
             if self.feature_only:
                 chunk_output = self._forward_impl(
-                    aggregated_tokens_list, images, patch_start_idx, frames_start_idx, frames_end_idx
+                    aggregated_tokens_list, images, patch_start_idx, frames_start_idx, frames_end_idx, vit_early=vit_early, vit_final=vit_final
                 )
                 all_preds.append(chunk_output)
             else:
                 chunk_preds, chunk_conf = self._forward_impl(
-                    aggregated_tokens_list, images, patch_start_idx, frames_start_idx, frames_end_idx
+                    aggregated_tokens_list, images, patch_start_idx, frames_start_idx, frames_end_idx, vit_early=vit_early, vit_final=vit_final
                 )
                 all_preds.append(chunk_preds)
                 all_conf.append(chunk_conf)
@@ -176,6 +206,8 @@ class DPTHead(nn.Module):
         patch_start_idx: int,
         frames_start_idx: int = None,
         frames_end_idx: int = None,
+        vit_early: torch.Tensor = None,  # NEW
+        vit_final: torch.Tensor = None,  # NEW
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Implementation of the forward pass through the DPT head.
@@ -224,7 +256,7 @@ class DPTHead(nn.Module):
             dpt_idx += 1
 
         # Fuse features from multiple layers.
-        out = self.scratch_forward(out)
+        out = self.scratch_forward(out, vit_early=vit_early, vit_final=vit_final)
         # Interpolate fused output to match target image resolution.
         out = custom_interpolate(
             out,
@@ -258,12 +290,14 @@ class DPTHead(nn.Module):
         pos_embed = pos_embed.permute(2, 0, 1)[None].expand(x.shape[0], -1, -1, -1)
         return x + pos_embed
 
-    def scratch_forward(self, features: List[torch.Tensor]) -> torch.Tensor:
+    def scratch_forward(self, features: List[torch.Tensor], vit_early: torch.Tensor = None, vit_final: torch.Tensor = None) -> torch.Tensor:
         """
         Forward pass through the fusion blocks.
 
         Args:
             features (List[Tensor]): List of feature maps from different layers.
+            vit_early (Tensor, optional): Early ViT features [B*S, 1024, 37, 37]
+            vit_final (Tensor, optional): Final ViT features [B*S, 1024, 37, 37]
 
         Returns:
             Tensor: Fused feature map.
@@ -286,6 +320,22 @@ class DPTHead(nn.Module):
 
         out = self.scratch.refinenet1(out, layer_1_rn)
         del layer_1_rn, layer_1
+
+        # NEW: Fuse with ViT features if available (following HQ-SAM)
+        if self.use_vit_features and vit_early is not None and vit_final is not None:
+            # Upsample ViT features
+            early_up = self.compress_vit_early(vit_early)  # [B*S, 256, 148, 148]
+            final_up = self.compress_vit_final(vit_final)  # [B*S, 256, 148, 148]
+            
+            # Resize if needed (should match after upsampling)
+            if early_up.shape[-2:] != out.shape[-2:]:
+                early_up = F.interpolate(early_up, size=out.shape[-2:], mode='bilinear', align_corners=True)
+                final_up = F.interpolate(final_up, size=out.shape[-2:], mode='bilinear', align_corners=True)
+            
+            # Element-wise addition (HQ-SAM style)
+            fused = out + early_up + final_up
+            fused = self.fusion_conv(fused)
+            out = fused
 
         out = self.scratch.output_conv1(out)
         return out

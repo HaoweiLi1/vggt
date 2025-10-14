@@ -181,16 +181,25 @@ class Aggregator(nn.Module):
             if hasattr(self.patch_embed, "mask_token"):
                 self.patch_embed.mask_token.requires_grad_(False)
 
-    def forward(self, images: torch.Tensor) -> Tuple[List[torch.Tensor], int]:
+    def forward(self, images: torch.Tensor, extract_vit_features: bool = False) -> Union[Tuple[List[torch.Tensor], int], Tuple[List[torch.Tensor], int, torch.Tensor, torch.Tensor]]:
         """
         Args:
             images (torch.Tensor): Input images with shape [B, S, 3, H, W], in range [0, 1].
                 B: batch size, S: sequence length, 3: RGB channels, H: height, W: width
+            extract_vit_features (bool): Whether to extract ViT intermediate features for fusion.
+                Default: False (maintains backward compatibility)
 
         Returns:
-            (list[torch.Tensor], int):
-                The list of outputs from the attention blocks,
-                and the patch_start_idx indicating where patch tokens begin.
+            If extract_vit_features=False:
+                (list[torch.Tensor], int):
+                    The list of outputs from the attention blocks,
+                    and the patch_start_idx indicating where patch tokens begin.
+            If extract_vit_features=True:
+                (list[torch.Tensor], int, torch.Tensor, torch.Tensor):
+                    The list of outputs from the attention blocks,
+                    the patch_start_idx,
+                    vit_early features [B*S, 1024, H//14, W//14],
+                    vit_final features [B*S, 1024, H//14, W//14]
         """
         B, S, C_in, H, W = images.shape
 
@@ -201,8 +210,25 @@ class Aggregator(nn.Module):
         images = (images - self._resnet_mean) / self._resnet_std
 
         # Reshape to [B*S, C, H, W] for patch embedding
-        images = images.view(B * S, C_in, H, W)
-        patch_tokens = self.patch_embed(images)
+        images_flat = images.view(B * S, C_in, H, W)
+        
+        # NEW: Extract ViT intermediate features if requested
+        vit_early, vit_final = None, None
+        if extract_vit_features and hasattr(self.patch_embed, 'get_intermediate_layers'):
+            # Extract ViT features (ViT is frozen, so we can use no_grad for efficiency)
+            with torch.no_grad():
+                vit_features = self.patch_embed.get_intermediate_layers(
+                    images_flat,
+                    n=[5, 23],  # 0-indexed: block 6 and 24
+                    reshape=True,
+                    return_class_token=False,
+                    norm=True
+                )
+                vit_early = vit_features[0].detach()  # [B*S, 1024, 37, 37]
+                vit_final = vit_features[1].detach()  # [B*S, 1024, 37, 37]
+        
+        # Get patch tokens (existing code)
+        patch_tokens = self.patch_embed(images_flat)
 
         if isinstance(patch_tokens, dict):
             patch_tokens = patch_tokens["x_norm_patchtokens"]
@@ -218,13 +244,13 @@ class Aggregator(nn.Module):
 
         pos = None
         if self.rope is not None:
-            pos = self.position_getter(B * S, H // self.patch_size, W // self.patch_size, device=images.device)
+            pos = self.position_getter(B * S, H // self.patch_size, W // self.patch_size, device=images_flat.device)
 
         if self.patch_start_idx > 0:
             # do not use position embedding for special tokens (camera and register tokens)
             # so set pos to 0 for the special tokens
             pos = pos + 1
-            pos_special = torch.zeros(B * S, self.patch_start_idx, 2).to(images.device).to(pos.dtype)
+            pos_special = torch.zeros(B * S, self.patch_start_idx, 2).to(images_flat.device).to(pos.dtype)
             pos = torch.cat([pos_special, pos], dim=1)
 
         # update P because we added special tokens
@@ -255,7 +281,12 @@ class Aggregator(nn.Module):
         del concat_inter
         del frame_intermediates
         del global_intermediates
-        return output_list, self.patch_start_idx
+        
+        # Return with optional ViT features
+        if extract_vit_features:
+            return output_list, self.patch_start_idx, vit_early, vit_final
+        else:
+            return output_list, self.patch_start_idx
 
     def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None):
         """
