@@ -15,7 +15,7 @@ def main():
     parser.add_argument(
         "--config", 
         type=str, 
-        default="default",
+        default="single_pair_test",
         help="Name of the config file (without .yaml extension, default: default)"
     )
     args = parser.parse_args()

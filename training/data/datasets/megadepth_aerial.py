@@ -60,7 +60,8 @@ class MegaDepthAerialDataset(BaseDataset):
         if osp.exists(self.ROOT):
             for item in os.listdir(self.ROOT):
                 scene_path = osp.join(self.ROOT, item)
-                if osp.isdir(scene_path) and not item.startswith('.'):
+                # Skip hidden directories, 'seg' directory, and non-directories
+                if osp.isdir(scene_path) and not item.startswith('.') and item != 'seg':
                     self.valid_scenes.append(item)
                     logging.info(f"Found scene directory: {item}")
         self.valid_scenes = sorted(self.valid_scenes)

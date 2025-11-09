@@ -1,14 +1,17 @@
-import torch
-import numpy as np
-import os
-import json
-from PIL import Image
 import argparse
+import contextlib
+import json
+import os
 from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from PIL import Image
+
 from vggt.models.vggt import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
-import matplotlib.pyplot as plt
 
 def normalize_depth_for_visualization(depth_map):
     """
@@ -54,9 +57,16 @@ def process_image(image_path, output_dir, model, device, dtype, vis_dir=None):
     # Load and preprocess image
     images = load_and_preprocess_images([image_path]).to(device)
     
+    autocast_enabled = device.startswith("cuda")
+    autocast_context = (
+        torch.cuda.amp.autocast(dtype=dtype)
+        if autocast_enabled
+        else contextlib.nullcontext()
+    )
+
     # Run inference
     with torch.no_grad():
-        with torch.cuda.amp.autocast(dtype=dtype):
+        with autocast_context:
             images_batch = images[None]
             aggregated_tokens_list, ps_idx = model.aggregator(images_batch)
             
@@ -91,48 +101,87 @@ def process_image(image_path, output_dir, model, device, dtype, vis_dir=None):
         }
     }
 
+def _extract_state_dict(checkpoint):
+    """Return the state dict and optional metadata from a checkpoint payload."""
+    epoch = None
+    if isinstance(checkpoint, dict):
+        if "model" in checkpoint and isinstance(checkpoint["model"], dict):
+            state_dict = checkpoint["model"]
+            epoch = checkpoint.get("prev_epoch")
+        else:
+            state_dict = checkpoint
+    else:
+        state_dict = checkpoint
+    return state_dict, epoch
+
+
+def _state_dict_has_vit_fusion(state_dict):
+    """Detect whether ViT fusion weights are present in the state dict."""
+    vit_indicators = (
+        "depth_head.compress_vit_early",
+        "depth_head.compress_vit_final",
+        "depth_head.fusion_conv",
+    )
+    return any(any(token in key for token in vit_indicators) for key in state_dict.keys())
+
+
 def load_model_from_pt(model_path, device):
-    """
-    Load VGGT model from a local .pt file.
-    
-    Args:
-        model_path: Path to the .pt model file
-        device: Device to load the model on
-    
-    Returns:
-        Loaded VGGT model
-    """
-    print(f"Loading model from: {model_path}")
-    
-    # Initialize the model architecture
-    model = VGGT()
-    
-    # Load the state dict from the .pt file
+    """Load a VGGT model from a local .pt file, handling training checkpoints and DDP."""
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model file not found: {model_path}")
-    
-    # Load state dict with map_location for proper device handling
-    state_dict = torch.load(model_path, map_location=device)
-    
-    # Load the state dict into the model
-    model.load_state_dict(state_dict)
-    
-    # Move model to device and set to eval mode
+
+    print(f"Loading model from: {model_path}")
+
+    checkpoint = torch.load(model_path, map_location="cpu")
+    state_dict_raw, epoch = _extract_state_dict(checkpoint)
+
+    # Remove DistributedDataParallel prefixes when present
+    state_dict = {}
+    for key, value in state_dict_raw.items():
+        state_dict[key.replace("module.", "", 1) if key.startswith("module.") else key] = value
+
+    use_vit_features = _state_dict_has_vit_fusion(state_dict)
+    if use_vit_features:
+        print("  Detected ViT fusion weights – enabling use_vit_features")
+    else:
+        print("  No ViT fusion weights found – using vanilla depth head")
+
+    model = VGGT(
+        enable_camera=True,
+        enable_depth=True,
+        enable_point=False,
+        enable_track=False,
+        use_vit_features=use_vit_features,
+    )
+
+    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+    if missing_keys:
+        print(f"  Warning: {len(missing_keys)} missing keys (expected for disabled heads)")
+    if unexpected_keys:
+        print(f"  Warning: {len(unexpected_keys)} unexpected keys")
+
+    if epoch is not None:
+        print(f"  Loaded parameters from training epoch {epoch}")
+
     model = model.to(device)
     model.eval()
-    
+
     print("Model loaded successfully!")
     return model
 
 def main():
     parser = argparse.ArgumentParser(description="VGGT depth and camera prediction")
-    parser.add_argument("--input", type=str, required=True, 
-                        help="Path to image file or directory containing images")
+    parser.add_argument(
+        "--input",
+        type=str,
+        required=True,
+        help="Path to image file or directory containing images",
+    )
     parser.add_argument("--output", type=str, default="vggt_output", 
                         help="Output directory")
     parser.add_argument("--vis", type=str, default=None, 
-                        help="Path to save visualizations (default: None)")
-    parser.add_argument("--model_path", type=str, default="model/vggt_1B.pt", 
+                        help="Optional path to save depth visualizations")
+    parser.add_argument("--model_path", type=str, default="model/vggt_1B_commercial.pt", 
                         help="Path to the VGGT model .pt file")
     
     args = parser.parse_args()
@@ -162,8 +211,13 @@ def main():
         return
     
     # Setup device and dtype
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+    if torch.cuda.is_available():
+        device = "cuda"
+        compute_capability = torch.cuda.get_device_capability()
+        dtype = torch.bfloat16 if compute_capability[0] >= 8 else torch.float16
+    else:
+        device = "cpu"
+        dtype = torch.float32
     
     print(f"Using device: {device}")
     print(f"Using dtype: {dtype}")

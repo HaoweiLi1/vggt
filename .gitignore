@@ -155,3 +155,7 @@ training/logs
 backup/
 .kiro/
 *.pdf
+Skyfall-GS
+EOGS
+aerial-megadepth
+.cursor

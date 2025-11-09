@@ -1,0 +1,72 @@
+# 测试配置：验证 AerialMegaDepth 数据加载
+# 用于快速测试数据加载器是否正确工作
+
+exp_name: test_aerial_megadepth_dataloader
+img_size: 518
+num_workers: 0  # 单线程测试
+seed_value: 42
+patch_size: 14
+
+# 限制批次数量以加快测试
+limit_train_batches: 5
+limit_val_batches: 2
+
+data:
+  train:
+    _target_: data.dynamic_dataloader.DynamicTorchDataset
+    num_workers: ${num_workers}
+    max_img_per_gpu: 2  # 小批次测试
+    common_config:
+      img_size: ${img_size}
+      patch_size: ${patch_size}
+      debug: True  # 启用调试模式
+      repeat_batch: False
+    dataset:
+      _target_: data.composed_dataset.ComposedDataset
+      dataset_configs:
+        - _target_: data.datasets.megadepth_aerial.MegaDepthAerialDataset
+          split: train
+          ROOT: /home/haowei/Documents/vggt/training/dataset_aerialmd/cropped
+          split_file: train.npz
+          segmentation_root: /home/haowei/Documents/vggt/training/dataset_aerialmd/cropped_seg
+          remove_sky: true  # 测试分割掩码
+          max_depth: 2000.0
+          depth_percentile: 98.0
+          use_pairs: true
+          expand_ratio: 2
+          len_train: 100  # 限制数据集大小
+      
+  val:
+    _target_: data.dynamic_dataloader.DynamicTorchDataset
+    num_workers: ${num_workers}
+    max_img_per_gpu: 2
+    common_config:
+      img_size: ${img_size}
+      patch_size: ${patch_size}
+      debug: True
+      repeat_batch: False
+    dataset:
+      _target_: data.composed_dataset.ComposedDataset
+      dataset_configs:
+        - _target_: data.datasets.megadepth_aerial.MegaDepthAerialDataset
+          split: val
+          ROOT: /home/haowei/Documents/vggt/training/dataset_aerialmd/cropped
+          split_file: val.npz
+          segmentation_root: /home/haowei/Documents/vggt/training/dataset_aerialmd/cropped_seg
+          remove_sky: true
+          max_depth: 2000.0
+          depth_percentile: 98.0
+          use_pairs: true
+          expand_ratio: 2
+          len_test: 50
+
+logging:
+  log_dir: logs/test_aerial
+  log_visuals: True  # 启用可视化
+  log_freq: 1
+  log_level_primary: DEBUG
+  log_level_secondary: INFO
+  all_ranks: False
+
+# 不需要训练，只测试数据加载
+max_epochs: 0
